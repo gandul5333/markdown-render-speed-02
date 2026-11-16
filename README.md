@@ -1,8 +1,8 @@
 # markdown-render-speed-02
 
-[![make.fun](https://img.shields.io/badge/make.fun-bounty-blue)](https://make.fun)
-[![markdown-render-speed-02](https://img.shields.io/badge/markdown--render--speed--02-entry-green)](https://make.fun)
-[![owner](https://img.shields.io/badge/owner-gandul5333-orange)](https://github.com/gandul5333)
+[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/gandul5333/markdown-render-speed-02/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/gandul5333/markdown-render-speed-02/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
 A dependency-free Markdown renderer written from scratch. It produces
 exactly the HTML that [marked 18.1.3](https://github.com/markedjs/marked)
