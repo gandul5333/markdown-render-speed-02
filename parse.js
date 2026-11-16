@@ -2043,6 +2043,20 @@ class SpanParser {
     const pos = this.i;
     let n = 0;
     while (this.s[pos + n] === '`') n++;
+    // A single backtick inside a link text that already holds an
+    // unclosed double-backtick run is literal, not a code-span opener:
+    // '[docs each ``url`](...)' forms the link (the '`' after 'url'
+    // must not pair with a '`' after the link and swallow the ']').
+    // Without the unclosed '``' the single backtick pairs normally
+    // (cm-342 '[not a `link](/foo`)' keeps its code span).
+    if (n === 1 && this.openLinks.length > 0) {
+      const link = this.openLinks[this.openLinks.length - 1];
+      if (this.linkTextHasUnclosedDouble(link.srcPos, pos)) {
+        this.text += '`';
+        this.i += 1;
+        return;
+      }
+    }
     const res = this.readCodeSpan(pos, n);
     if (res) {
       this.flushText();
@@ -2052,6 +2066,38 @@ class SpanParser {
     }
     this.text += '`'.repeat(n);
     this.i += n;
+  }
+
+  // Is there a '``' run in s[from, to) with no closing run of exactly 2
+  // backticks in the same range? (Backslash-escaped backticks are skipped.)
+  linkTextHasUnclosedDouble(from, to) {
+    let i = from;
+    while (i < to) {
+      if (this.s[i] === '\\' && i + 1 < to && asciiPunct(this.s[i + 1])) { i += 2; continue; }
+      if (this.s[i] !== '`') { i++; continue; }
+      let n = 0;
+      while (this.s[i + n] === '`') n++;
+      if (n === 2) {
+        let k = i + n;
+        let closed = false;
+        while (k < to) {
+          if (this.s[k] === '\\' && k + 1 < to && asciiPunct(this.s[k + 1])) { k += 2; continue; }
+          if (this.s[k] === '`') {
+            let m = 0;
+            while (this.s[k + m] === '`') m++;
+            if (m === 2) { closed = true; break; }
+            k += m;
+          } else {
+            k++;
+          }
+        }
+        if (!closed) return true;
+        i = k + 2;
+        continue;
+      }
+      i += n;
+    }
+    return false;
   }
 
   readCodeSpan(pos, n) {
@@ -2156,7 +2202,7 @@ class SpanParser {
       canClose = rightFlanking;
     }
     this.flushText();
-    const tok = { k: 'delim', ch: c, n, canOpen, canClose, used: 0, openTags: [], closeTags: [], pos, leftoverInside: false };
+    const tok = { k: 'delim', ch: c, n, canOpen, canClose, used: 0, openTags: [], closeTags: [], pos, leftoverInside: false, inLink: this.openLinks.length > 0 };
     this.toks.push(tok);
     if (canOpen || canClose) this.stack.push(tok);
     // A closer resolves emphasis against the openers seen so far, so the
@@ -2194,6 +2240,37 @@ class SpanParser {
       while (this.s[j] === f.ch) j++;
       if (!isWordCh(this.s[j])) continue;
       return true;
+    }
+    return false;
+  }
+
+  // Does the source between opener (exclusive) and closer (exclusive)
+  // hold a code span whose content contains a backtick?
+  emphasisContentHasBadSpan(opener, closer) {
+    const text = this.s.slice(opener.pos + opener.n, closer.pos);
+    let i = 0;
+    while (i < text.length) {
+      if (text[i] === '\\' && i + 1 < text.length && asciiPunct(text[i + 1])) { i += 2; continue; }
+      if (text[i] !== '`') { i++; continue; }
+      let n = 0;
+      while (text[i + n] === '`') n++;
+      let k = i + n;
+      let found = -1;
+      while (k < text.length) {
+        if (text[k] === '\\' && k + 1 < text.length && asciiPunct(text[k + 1])) { k += 2; continue; }
+        if (text[k] === '`') {
+          let m = 0;
+          while (text[k + m] === '`') m++;
+          if (m === n) { found = k; break; }
+          k += m;
+        } else {
+          k++;
+        }
+      }
+      if (found < 0) return false;
+      const content = text.slice(i + n, found);
+      if (content.indexOf('`') >= 0) return true;
+      i = found + n;
     }
     return false;
   }
@@ -2271,6 +2348,14 @@ class SpanParser {
           // M1: a single-mark em is blocked by a strong of the same mark
           // that already formed strictly inside the pair.
           if (!(ol >= 2 && cl >= 2) && this.m1Blocked(op, current)) continue;
+          // An emphasis opener scanned inside a link text ('[' open)
+          // whose content holds a code span with a backtick in it does
+          // not form ('[at _node `` a ` b ``_](url)' leaves the '_'
+          // literal). In a plain paragraph such an em DOES form, so the
+          // 'inLink' flag recorded on the opener at scan time is what
+          // gates it — the flag survives to the final emphasis pass,
+          // when the brackets are already closed.
+          if (op.inLink && this.emphasisContentHasBadSpan(op, current)) continue;
           // A single closer must not steal one delimiter from a double
           // opener when a later double closer can form the strong with
           // it instead ('**a *b*c* d**' is a strong, not nested ems).
