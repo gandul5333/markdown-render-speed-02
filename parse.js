@@ -1896,6 +1896,13 @@ function linkTextBlockedBySpans(text) {
   let bad = 0;
   let unclosed = 0;
   let lastBadEnd = -1;
+  // Closed code spans (any length) and unclosed '``' runs: a text that
+  // holds an unclosed '``' AND a closed code span is blocked ('[a
+  // ``b`][c]: [`d`](url)' does not form the link), while a text with
+  // only unclosed runs is judged by parity ('[issue read two
+  // ``small`](url)' forms).
+  let closedSpans = 0;
+  let unclosedDouble = 0;
   let i = 0;
   while (i < text.length) {
     // A backslash escape is a literal character, not a code-span
@@ -1921,9 +1928,11 @@ function linkTextBlockedBySpans(text) {
     }
     if (found < 0) {
       unclosed++;
+      if (n === 2) unclosedDouble++;
       i += n;
       continue;
     }
+    closedSpans++;
     const content = text.slice(i + n, found);
     if (content.indexOf('`') >= 0) {
       bad++;
@@ -1931,6 +1940,7 @@ function linkTextBlockedBySpans(text) {
     }
     i = found + n;
   }
+  if (unclosedDouble > 0 && closedSpans > 0) return true;
   if (bad === 0) return (unclosed % 2) === 1;
   const total = bad + unclosed;
   return (total % 2) === 1 && lastBadEnd !== text.length;
@@ -1969,6 +1979,10 @@ class SpanParser {
     // {tag, ch, openPos, closeEnd} (source positions). Used by the M1 and R
     // rules, which look at what formed inside a span before it closes.
     this.formed = [];
+    // True once a link whose text holds an unclosed '``' run has formed
+    // in this inline run. After such a link, marked does not form
+    // emphasis when a code span follows later in the paragraph.
+    this.afterUnclosedDoubleLink = false;
   }
 
   run() {
@@ -2043,21 +2057,67 @@ class SpanParser {
     const pos = this.i;
     let n = 0;
     while (this.s[pos + n] === '`') n++;
-    // A single backtick inside a link text that already holds an
+    // A single backtick inside a link's text that already holds an
     // unclosed double-backtick run is literal, not a code-span opener:
     // '[docs each ``url`](...)' forms the link (the '`' after 'url'
     // must not pair with a '`' after the link and swallow the ']').
     // Without the unclosed '``' the single backtick pairs normally
-    // (cm-342 '[not a `link](/foo`)' keeps its code span).
+    // (cm-342 '[not a `link](/foo`)' keeps its code span). This applies
+    // when the link's ']' is followed by '(' (inline link), or by '['
+    // whose label is a DEFINED reference ('[run ``response`][tool-91]'
+    // forms when tool-91 is defined, so its '`' is literal; when the
+    // label is undefined the '`' pairs across and forms a code span).
     if (n === 1 && this.openLinks.length > 0) {
       const link = this.openLinks[this.openLinks.length - 1];
       if (this.linkTextHasUnclosedDouble(link.srcPos, pos)) {
-        this.text += '`';
-        this.i += 1;
-        return;
+        let depth = 0;
+        let closeIdx = -1;
+        for (let j = pos + 1; j < this.len; j++) {
+          const c = this.s[j];
+          if (c === '\\' && j + 1 < this.len) { j++; continue; }
+          if (c === '[') depth++;
+          else if (c === ']') {
+            if (depth === 0) { closeIdx = j; break; }
+            depth--;
+          }
+        }
+        let isLink = false;
+        if (closeIdx >= 0) {
+          if (this.s[closeIdx + 1] === '(') isLink = true;
+          else if (this.s[closeIdx + 1] === '[') {
+            const lab = this.readLabel(closeIdx + 1);
+            if (lab) {
+              const label = lab.label === '' ? this.s.slice(link.srcPos, closeIdx) : lab.label;
+              if (label.length <= 999 && !hasUnescapedOpenBracket(label) && this.refs.has(normalizeLabel(label))) isLink = true;
+            }
+          }
+        }
+        if (isLink) {
+          this.text += '`';
+          this.i += 1;
+          return;
+        }
       }
     }
-    const res = this.readCodeSpan(pos, n);
+    // A multi-backtick run inside a link text cannot close past the
+    // ']' that ends that link: '[docs each ``url`](...)' must not let
+    // the '``' before 'url' pair with a later '``' and swallow the ']'.
+    // Single backticks are left unbounded (a '`' code span may span a
+    // ']' — cm-342, cm-525, cm-537 — but a '``' span may not).
+    let limit = this.len;
+    if (n >= 2 && this.openLinks.length > 0) {
+      let depth = 0;
+      for (let j = pos + n; j < this.len; j++) {
+        const c = this.s[j];
+        if (c === '\\' && j + 1 < this.len) { j++; continue; }
+        if (c === '[') depth++;
+        else if (c === ']') {
+          if (depth === 0) { limit = j; break; }
+          depth--;
+        }
+      }
+    }
+    const res = this.readCodeSpan(pos, n, limit);
     if (res) {
       this.flushText();
       this.toks.push({ k: 'code', s: res.text });
@@ -2066,6 +2126,21 @@ class SpanParser {
     }
     this.text += '`'.repeat(n);
     this.i += n;
+  }
+
+  // Is there a code span (a backtick run with a matching closing run)
+  // starting at or after `from`?
+  hasLaterCodeSpan(from) {
+    let i = from;
+    while (i < this.len) {
+      if (this.s[i] === '\\' && i + 1 < this.len && asciiPunct(this.s[i + 1])) { i += 2; continue; }
+      if (this.s[i] !== '`') { i++; continue; }
+      let n = 0;
+      while (this.s[i + n] === '`') n++;
+      if (this.readCodeSpan(i, n)) return true;
+      i += n;
+    }
+    return false;
   }
 
   // Is there a '``' run in s[from, to) with no closing run of exactly 2
@@ -2100,9 +2175,9 @@ class SpanParser {
     return false;
   }
 
-  readCodeSpan(pos, n) {
+  readCodeSpan(pos, n, limit = this.len) {
     let k = pos + n;
-    while (k < this.len) {
+    while (k < limit) {
       if (this.s[k] === '`') {
         let m = 0;
         while (this.s[k + m] === '`') m++;
@@ -2348,6 +2423,12 @@ class SpanParser {
           // M1: a single-mark em is blocked by a strong of the same mark
           // that already formed strictly inside the pair.
           if (!(ol >= 2 && cl >= 2) && this.m1Blocked(op, current)) continue;
+          // After a link whose text holds an unclosed '``' run, emphasis
+          // does not form when a code span follows later in the
+          // paragraph ('[a ``b`](url) __c__ `d`' leaves '__c__' literal,
+          // but '[a ``b`](url) __c__' forms the strong). Both the flag
+          // and a later code span are required.
+          if (this.afterUnclosedDoubleLink && this.hasLaterCodeSpan(current.pos + current.n)) continue;
           // An emphasis opener scanned inside a link text ('[' open)
           // whose content holds a code span with a backtick in it does
           // not form ('[at _node `` a ` b ``_](url)' leaves the '_'
@@ -2521,6 +2602,11 @@ class SpanParser {
       this.i++;
       return;
     }
+    // A link whose text holds an unclosed '``' run suppresses emphasis
+    // later in the paragraph when a code span follows (marked quirk).
+    // Only INLINE links do this; a reference link ('[run
+    // ``response`][tool-91]') leaves following emphasis alone.
+    if (kind === 'inline' && this.linkTextHasUnclosedDouble(link.srcPos, this.i)) this.afterUnclosedDoubleLink = true;
     this.formLink(link, dest, title, endPos);
   }
 
