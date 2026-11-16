@@ -172,6 +172,9 @@ function looksLikeEntity(src, i) {
 }
 
 function escapeText(s) {
+  // Fast path: most text has no escapable character; return it untouched
+  // instead of rebuilding it one character at a time.
+  if (!/[<>"'&]/.test(s)) return s;
   let out = '';
   let i = 0;
   while (i < s.length) {
@@ -193,6 +196,8 @@ function escapeText(s) {
 }
 
 function escapeCode(s) {
+  // Fast path: most code has no escapable character.
+  if (!/[<>"'&]/.test(s)) return s;
   let out = '';
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -490,8 +495,14 @@ class DocBuilder {
           return -1;
         }
         line.advanceChars(1);
-        if (line.ch() === ' ') line.advanceCols(1);
-        else if (line.ch() === '\t') line.advanceCols(1);
+        // The whitespace after '>' is expanded in the frame that starts
+        // at the list-item content (marked's list J strips the item indent
+        // before the blockquote J runs), so the tab width is measured from
+        // itemIndent, not from the absolute column: a tab at absolute col
+        // 8 in an item of indent 7 is at frame col 1 (width 3), not col 8
+        // (width 4). Passing itemIndent as the base reproduces that.
+        if (line.ch() === ' ') line.advanceCols(1, line.itemIndent);
+        else if (line.ch() === '\t') line.advanceCols(1, line.itemIndent);
         depth = k;
       } else if (blk.t === 'list') {
         depth = k;
@@ -501,8 +512,13 @@ class DocBuilder {
             this._failDepth = k;
             return -1;
           }
+          // A blank line keeps the list item open, but containers nested
+          // inside the item (a blockquote, a fenced code block) do NOT
+          // match a blank line: keep scanning so a deeper blockquote can
+          // fail and pop, instead of breaking here and leaving a fenced
+          // code block open to swallow the blank line as content.
           depth = k;
-          break;
+          continue;
         }
         const ind = line.indentCols();
         if (ind >= blk.indent) {
@@ -697,9 +713,12 @@ class DocBuilder {
     // A line inside a blockquote whose content after the '>' marker is
     // non-empty (even if only spaces) is paragraph content, not a blank
     // line: '>  ' contributes a space line to the paragraph (cm-241).
-    // Outside a blockquote, a whitespace-only line is blank.
+    // Outside a blockquote, a whitespace-only line is blank. A truly
+    // empty line has rest() == '\n' (the newline is part of the line),
+    // so strip one trailing newline before testing emptiness.
     const inBlockquote = this.stack.some((b) => b.t === 'blockquote');
-    if (inBlockquote ? line.rest().length === 0 : line.isBlank()) {
+    const restNoNL = line.rest().replace(/\n$/, '');
+    if (inBlockquote ? restNoNL.length === 0 : line.isBlank()) {
       this.handleBlankLine();
       return;
     }
@@ -1488,6 +1507,12 @@ class DocBuilder {
   // from the current line plus up to 10 following lines (after container
   // stripping). The first definition for a label wins.
   tryLinkDef(line) {
+    // Fast reject: a definition starts with '[' after at most 3 spaces
+    // of indent. Most paragraphs do not, so skip the 10-line lookahead
+    // and full parse attempt entirely for them.
+    let j = 0;
+    while (j < 3 && (line.chAt(j) === ' ' || line.chAt(j) === '\t')) j++;
+    if (line.chAt(j) !== '[') return 0;
     const parts = [line.rest()];
     for (let k = 1; k <= 10; k++) {
       const nxt = this.peekContent(this.lineIdx + k);
@@ -1988,6 +2013,20 @@ class SpanParser {
   run() {
     while (this.i < this.len) {
       const c = this.s[this.i];
+      // Letters are by far the most common character in prose: check
+      // them first so a letter costs one comparison instead of failing
+      // ten special-character tests. An extended autolink (www. or
+      // scheme:) can only start where the previous character is not a
+      // scheme character: scanAutolink returns false for a letter
+      // preceded by a letter/digit, so mid-word letters never start
+      // one. Skip the scan entirely there instead of calling
+      // scanAutolink (and scanScheme) for every letter of every word.
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        if (!this.linkState.inLink && (this.i === 0 || !isSchemeChar(this.s[this.i - 1])) && this.scanAutolink()) continue;
+        this.text += c;
+        this.i++;
+        continue;
+      }
       if (c === '\\') { this.scanBackslash(); continue; }
       if (c === '`') { this.scanBacktick(); continue; }
       if (c === '[') { this.pushBracket(false); continue; }
@@ -2005,12 +2044,6 @@ class SpanParser {
       if (c === '@') {
         if (!this.linkState.inLink && this.scanEmail()) continue;
         this.text += '@';
-        this.i++;
-        continue;
-      }
-      if (c === 'w' || isAsciiLetter(c)) {
-        if (!this.linkState.inLink && this.scanAutolink()) continue;
-        this.text += c;
         this.i++;
         continue;
       }
@@ -3068,23 +3101,25 @@ class SpanParser {
   }
 
   scanScheme(pos) {
-    let i = pos;
-    if (!isAsciiLetter(this.s[i])) return null;
-    i++;
-    let n = 1;
-    while (i < this.len && n < 32 && isSchemeChar(this.s[i])) { i++; n++; }
-    if (n < 2) return null;
-    if (this.s[i] !== ':') return null;
-    const colonIdx = i;
-    // Extended autolinks only recognise http/https/ftp (which need '//'
-    // after the scheme) and mailto/xmpp (which carry an email address).
-    // Any other scheme ('server:', 'ssh://', 'custom://', 'Warning:') is
-    // plain text, not a link.
+    // Fast reject: only http/https/ftp/mailto/xmpp are extended-autolink
+    // schemes, so only these initials can start one. Check the initial
+    // before allocating a lowercased prefix slice.
+    const c0 = this.s[pos];
+    if (c0 !== 'h' && c0 !== 'H' && c0 !== 'f' && c0 !== 'F' && c0 !== 'm' && c0 !== 'M' && c0 !== 'x' && c0 !== 'X') return null;
+    const head = this.s.slice(pos, pos + 7).toLowerCase();
+    let schemeLen;
+    if (head.startsWith('https:')) schemeLen = 5;
+    else if (head.startsWith('mailto:')) schemeLen = 6;
+    else if (head.startsWith('http:')) schemeLen = 4;
+    else if (head.startsWith('xmpp:')) schemeLen = 4;
+    else if (head.startsWith('ftp:')) schemeLen = 3;
+    else return null;
+    const colonIdx = pos + schemeLen;
     const scheme0 = this.s.slice(pos, colonIdx).toLowerCase();
     if (scheme0 !== 'http' && scheme0 !== 'https' && scheme0 !== 'ftp' && scheme0 !== 'mailto' && scheme0 !== 'xmpp') return null;
     if ((scheme0 === 'http' || scheme0 === 'https' || scheme0 === 'ftp') &&
         !(this.s[colonIdx + 1] === '/' && this.s[colonIdx + 2] === '/')) return null;
-    i++;
+    let i = colonIdx + 1;
     let j = i;
     while (j < this.len) {
       const c = this.s[j];
