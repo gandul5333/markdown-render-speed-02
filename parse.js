@@ -248,8 +248,11 @@ function decodeNumeric(body) {
 // encodeURI leaves [ ] alone, so percent-encode those too.
 function encodeLink(dest) {
   let s = encodeURI(dest);
-  s = s.replace(/%25([0-9A-Fa-f]{2})?/g, (m, hex) => (hex ? '%' + hex : '%'));
-  s = s.replace(/\[/g, '%5B').replace(/\]/g, '%5D');
+  // The replacements are only needed when the characters are present;
+  // most URLs have none of them, so skip the regex passes entirely.
+  if (s.indexOf('%') >= 0) s = s.replace(/%25([0-9A-Fa-f]{2})?/g, (m, hex) => (hex ? '%' + hex : '%'));
+  if (s.indexOf('[') >= 0) s = s.replace(/\[/g, '%5B');
+  if (s.indexOf(']') >= 0) s = s.replace(/\]/g, '%5D');
   return s;
 }
 
