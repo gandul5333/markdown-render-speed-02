@@ -1,38 +1,37 @@
-// Grading driver for the markdown-render-speed-02 entry.
+// Driver for the markdown-render-speed-02 entry.
 //
-// The grader runs `node /bot/main.ts` under Node 22. It reads the case
-// list from cases.json in the input directory (a JSON array of objects
-// shaped { id, markdown }), renders every markdown string on its own
-// through parse() from ./parse.js, and writes the HTML strings — one per
-// case, in the same order — as a JSON array to html.json in the output
-// directory.
+// The grader executes `node /bot/main.ts` with Node 22. It takes the case
+// list from cases.json in the input directory (an array of { id, markdown }
+// objects), renders each markdown string on its own through parse() from
+// ./parse.js, and writes the resulting HTML strings — one per case, in
+// input order — as a JSON array to html.json in the output directory.
 //
-// The input/output directories default to /input and /output; outside the
-// grading container they can be pointed elsewhere with the
-// MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR environment variables, which
-// is how the practice set is checked locally. No other environment, file,
-// or clock is consulted: the output depends only on the cases given.
+// The input and output directories default to /input and /output. Outside
+// the grading container they can be redirected with MAKEFUN_INPUT_DIR and
+// MAKEFUN_OUTPUT_DIR, which is how the practice set is checked locally.
+// Nothing else is consulted: no clock, no network, no other files, so the
+// output is a pure function of the cases given.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
-const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const inDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-interface CaseInput {
+interface Case {
   id: string;
   markdown: string;
 }
 
-const raw = readFileSync(join(inputDir, 'cases.json'), 'utf8');
-const caseList = JSON.parse(raw) as CaseInput[];
+const cases = JSON.parse(readFileSync(join(inDir, 'cases.json'), 'utf8')) as Case[];
 
 // One output slot per case, filled in order so the result lines up
 // exactly with the input list.
-const htmlOut: string[] = new Array(caseList.length);
-for (let k = 0; k < caseList.length; k++) {
-  htmlOut[k] = parse(caseList[k].markdown);
+const html: string[] = new Array(cases.length);
+for (let i = 0; i < cases.length; i++) {
+  html[i] = parse(cases[i].markdown);
 }
 
-writeFileSync(join(outputDir, 'html.json'), JSON.stringify(htmlOut));
+mkdirSync(outDir, { recursive: true });
+writeFileSync(join(outDir, 'html.json'), JSON.stringify(html));
